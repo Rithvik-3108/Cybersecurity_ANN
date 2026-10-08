@@ -965,7 +965,7 @@ export default function App() {
             <div>
               <label className="field-label" htmlFor="logs">Security logs (CSV)</label>
               <div className={`dropzone ${file ? 'has-file' : ''}`}>
-                <input id="logs" type="file" accept=".csv" className="dropzone-input" onChange={handleFile} />
+                <input id="logs" type="file" accept=".csv,text/csv,application/vnd.ms-excel" className="dropzone-input" onChange={handleFile} />
                 <svg className="dropzone-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" />
                 </svg>
