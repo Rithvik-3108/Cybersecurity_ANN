@@ -6,3 +6,4 @@ scikit-learn
 tensorflow
 joblib
 huggingface_hub
+python-multipart
