@@ -1907,6 +1907,8 @@
 #         raise HTTPException(status_code=422, detail=str(e))
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
+
+
 import os
 import re
 import time
@@ -1934,27 +1936,53 @@ def ensure_models_downloaded():
     os.makedirs(BASE_DIR, exist_ok=True)
     
     artifacts = [
+        # NSL-KDD
         "nsl_kdd_event_encoder.pkl",
         "nsl_kdd_vectorizer.pkl",
         "nsl_kdd_basepoint.pkl",
         "nsl_kdd_scaler.pkl",
         "nsl_kdd_meta.pkl",
         "nsl_kdd_dl_fcnn.keras",
+        "nsl_kdd_dl_cnn.keras",
+        "nsl_kdd_dl_lstm.keras",
+        "nsl_kdd_ml_decision_tree.pkl",
+        "nsl_kdd_ml_knn.pkl",
+        "nsl_kdd_ml_naive_bayes.pkl",
+        "nsl_kdd_ml_random_forest.pkl",
+        "nsl_kdd_ml_svm.pkl",
         
+        # CICIDS2017
         "cicids2017_event_encoder.pkl",
         "cicids2017_vectorizer.pkl",
         "cicids2017_basepoint.pkl",
         "cicids2017_scaler.pkl",
         "cicids2017_meta.pkl",
         "cicids2017_dl_fcnn.keras",
+        "cicids2017_dl_cnn.keras",
+        "cicids2017_dl_lstm.keras",
+        "cicids2017_ml_decision_tree.pkl",
+        "cicids2017_ml_knn.pkl",
+        "cicids2017_ml_naive_bayes.pkl",
+        "cicids2017_ml_random_forest.pkl",
+        "cicids2017_ml_svm.pkl",
         
+        # UNSW-NB15
         "unsw_nb15_event_encoder.pkl",
         "unsw_nb15_vectorizer.pkl",
         "unsw_nb15_basepoint.pkl",
         "unsw_nb15_scaler.pkl",
         "unsw_nb15_meta.pkl",
         "unsw_nb15_dl_fcnn.keras",
+        "unsw_nb15_dl_cnn.keras",
+        "unsw_nb15_dl_lstm.keras",
+        "unsw_nb15_ml_decision_tree.pkl",
+        "unsw_nb15_ml_knn.pkl",
+        "unsw_nb15_ml_naive_bayes.pkl",
+        "unsw_nb15_ml_random_forest.pkl",
+        "unsw_nb15_ml_svm.pkl",
     ]
+    
+    hf_token = os.getenv("HF_TOKEN")
     
     for filename in artifacts:
         file_path = os.path.join(BASE_DIR, filename)
@@ -1966,7 +1994,8 @@ def ensure_models_downloaded():
                     repo_type="dataset",
                     filename=filename,
                     local_dir=BASE_DIR,
-                    local_dir_use_symlinks=False
+                    local_dir_use_symlinks=False,
+                    token=hf_token
                 )
                 print(f"Successfully downloaded {filename}")
             except Exception as e:
