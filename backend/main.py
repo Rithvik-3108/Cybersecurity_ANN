@@ -1911,9 +1911,9 @@ import os
 import re
 import time
 import pickle
-import urllib.request
 from enum import Enum
 from functools import lru_cache
+from huggingface_hub import hf_hub_download
 
 import joblib
 import numpy as np
@@ -1927,17 +1927,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 BASE_DIR = "saved_models"
 
 # ==========================================
-# DIRECT ARTIFACT DOWNLOAD FROM HUGGING FACE
+# ROBUST ARTIFACT DOWNLOAD FROM HUGGING FACE
 # ==========================================
 def ensure_models_downloaded():
-    """Downloads required model artifacts directly via public URLs if missing locally."""
+    """Downloads required model artifacts from Hugging Face dataset repo if missing locally."""
     os.makedirs(BASE_DIR, exist_ok=True)
     
-    # List the exact artifact filenames needed by your datasets
-    # (Update or add filenames below if your project uses specific prefixes)
     artifacts = [
-        # Example files for nsl_kdd, cicids2017, and unsw_nb15. 
-        # Ensure these match the exact filenames in your public repository.
         "nsl_kdd_event_encoder.pkl",
         "nsl_kdd_vectorizer.pkl",
         "nsl_kdd_basepoint.pkl",
@@ -1963,10 +1959,15 @@ def ensure_models_downloaded():
     for filename in artifacts:
         file_path = os.path.join(BASE_DIR, filename)
         if not os.path.exists(file_path):
-            print(f"Downloading {filename} from Hugging Face...")
-            url = f"https://huggingface.co/datasets/Rithvik-3103/cyber-ann-models/resolve/main/{filename}"
+            print(f"Downloading {filename} from Hugging Face dataset repository...")
             try:
-                urllib.request.urlretrieve(url, file_path)
+                hf_hub_download(
+                    repo_id="Rithvik-3103/cyber-ann-models",
+                    repo_type="dataset",
+                    filename=filename,
+                    local_dir=BASE_DIR,
+                    local_dir_use_symlinks=False
+                )
                 print(f"Successfully downloaded {filename}")
             except Exception as e:
                 print(f"Warning: Could not download {filename}: {e}")
