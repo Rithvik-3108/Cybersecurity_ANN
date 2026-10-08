@@ -241,7 +241,7 @@ import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import './App1.css';
 
-const API_URL = 'http://localhost:8000';
+const API_URL = 'const API_URL = import.meta.env.VITE_API_URL || 'https://cybersecurity-ann.onrender.com';';
 const MAX_UPLOAD_MB = 200;
 const PAGE_SIZES = [10, 25, 50, 100];
 const SEV_RANK = { high: 3, medium: 2, low: 1 };
