@@ -1382,13 +1382,13 @@
 #         raise HTTPException(status_code=422, detail=str(e))
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
-
 import os
 import re
 import time
 import pickle
 from enum import Enum
 from functools import lru_cache
+from huggingface_hub import snapshot_download
 
 import joblib
 import numpy as np
@@ -1398,6 +1398,29 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.metrics.pairwise import cosine_similarity
+
+BASE_DIR = "saved_models"
+
+# ==========================================
+# AUTO-DOWNLOAD MODELS FROM HUGGING FACE
+# ==========================================
+def ensure_models_downloaded():
+    """Downloads models from Hugging Face if they don't exist locally (e.g., on Render)."""
+    os.makedirs(BASE_DIR, exist_ok=True)
+    if not os.listdir(BASE_DIR):
+        print("Models directory is empty. Downloading artifacts from Hugging Face...")
+        try:
+            snapshot_download(
+                repo_id="Rithvik-3103/cyber-ann-models",  # <--- REPLACE WITH YOUR ACTUAL HF USERNAME & REPO
+                repo_type="dataset",                         
+                local_dir=BASE_DIR
+            )
+            print("Successfully downloaded all models!")
+        except Exception as e:
+            print(f"Error downloading models: {e}")
+
+# Run the check immediately when the app starts up
+ensure_models_downloaded()
 
 # 1. Initialize the FastAPI app exactly once
 app = FastAPI(title="AI-SIEM Multi-Dataset Intrusion Detection API")
@@ -1410,8 +1433,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-BASE_DIR = "saved_models"
 
 # Severity is derived from the model's attack score (0-1). Tune the bands here.
 SEVERITY_BANDS = ((0.90, "high"), (0.70, "medium"))  # anything lower is "low"
