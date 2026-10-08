@@ -1907,15 +1907,13 @@
 #         raise HTTPException(status_code=422, detail=str(e))
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
-
-
 import os
 import re
 import time
 import pickle
+import urllib.request
 from enum import Enum
 from functools import lru_cache
-from huggingface_hub import snapshot_download
 
 import joblib
 import numpy as np
@@ -1929,22 +1927,49 @@ from sklearn.metrics.pairwise import cosine_similarity
 BASE_DIR = "saved_models"
 
 # ==========================================
-# AUTO-DOWNLOAD MODELS FROM HUGGING FACE
+# DIRECT ARTIFACT DOWNLOAD FROM HUGGING FACE
 # ==========================================
 def ensure_models_downloaded():
-    """Downloads models from Hugging Face if they don't exist locally (e.g., on Render)."""
+    """Downloads required model artifacts directly via public URLs if missing locally."""
     os.makedirs(BASE_DIR, exist_ok=True)
-    if not os.listdir(BASE_DIR):
-        print("Models directory is empty. Downloading artifacts from Hugging Face...")
-        try:
-            snapshot_download(
-                repo_id="Rithvik-3103/cyber-ann-models",
-                repo_type="dataset",
-                local_dir=BASE_DIR
-            )
-            print("Successfully downloaded all models!")
-        except Exception as e:
-            print(f"Error downloading models: {e}")
+    
+    # List the exact artifact filenames needed by your datasets
+    # (Update or add filenames below if your project uses specific prefixes)
+    artifacts = [
+        # Example files for nsl_kdd, cicids2017, and unsw_nb15. 
+        # Ensure these match the exact filenames in your public repository.
+        "nsl_kdd_event_encoder.pkl",
+        "nsl_kdd_vectorizer.pkl",
+        "nsl_kdd_basepoint.pkl",
+        "nsl_kdd_scaler.pkl",
+        "nsl_kdd_meta.pkl",
+        "nsl_kdd_dl_fcnn.keras",
+        
+        "cicids2017_event_encoder.pkl",
+        "cicids2017_vectorizer.pkl",
+        "cicids2017_basepoint.pkl",
+        "cicids2017_scaler.pkl",
+        "cicids2017_meta.pkl",
+        "cicids2017_dl_fcnn.keras",
+        
+        "unsw_nb15_event_encoder.pkl",
+        "unsw_nb15_vectorizer.pkl",
+        "unsw_nb15_basepoint.pkl",
+        "unsw_nb15_scaler.pkl",
+        "unsw_nb15_meta.pkl",
+        "unsw_nb15_dl_fcnn.keras",
+    ]
+    
+    for filename in artifacts:
+        file_path = os.path.join(BASE_DIR, filename)
+        if not os.path.exists(file_path):
+            print(f"Downloading {filename} from Hugging Face...")
+            url = f"https://huggingface.co/datasets/Rithvik-3103/cyber-ann-models/resolve/main/{filename}"
+            try:
+                urllib.request.urlretrieve(url, file_path)
+                print(f"Successfully downloaded {filename}")
+            except Exception as e:
+                print(f"Warning: Could not download {filename}: {e}")
 
 # Run the check immediately when the app starts up
 ensure_models_downloaded()
