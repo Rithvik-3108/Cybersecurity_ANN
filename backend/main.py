@@ -1382,6 +1382,534 @@
 #         raise HTTPException(status_code=422, detail=str(e))
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ###V3
+# import os
+# import re
+# import time
+# import pickle
+# from enum import Enum
+# from functools import lru_cache
+# from huggingface_hub import snapshot_download
+
+# import joblib
+# import numpy as np
+# import pandas as pd
+# import tensorflow as tf
+# from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+# from fastapi.middleware.cors import CORSMiddleware
+# from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
+# from sklearn.metrics.pairwise import cosine_similarity
+
+# BASE_DIR = "saved_models"
+
+# # ==========================================
+# # AUTO-DOWNLOAD MODELS FROM HUGGING FACE
+# # ==========================================
+# def ensure_models_downloaded():
+#     """Downloads models from Hugging Face if they don't exist locally (e.g., on Render)."""
+#     os.makedirs(BASE_DIR, exist_ok=True)
+#     if not os.listdir(BASE_DIR):
+#         print("Models directory is empty. Downloading artifacts from Hugging Face...")
+#         try:
+#             snapshot_download(
+#                 repo_id="Rithvik-3103/cyber-ann-models",  # <--- REPLACE WITH YOUR ACTUAL HF USERNAME & REPO
+#                 repo_type="dataset",                         
+#                 local_dir=BASE_DIR
+#             )
+#             print("Successfully downloaded all models!")
+#         except Exception as e:
+#             print(f"Error downloading models: {e}")
+
+# # Run the check immediately when the app starts up
+# ensure_models_downloaded()
+
+# # 1. Initialize the FastAPI app exactly once
+# app = FastAPI(title="AI-SIEM Multi-Dataset Intrusion Detection API")
+
+# # Allows requests from any frontend port (Vite/React)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+# # Severity is derived from the model's attack score (0-1). Tune the bands here.
+# SEVERITY_BANDS = ((0.90, "high"), (0.70, "medium"))  # anything lower is "low"
+
+# # Max flagged rows sent to the browser per scan (highest scores first).
+# # Summary counts always cover every record. Set MAX_THREAT_ROWS=0 for no limit.
+# MAX_THREAT_ROWS = int(os.getenv("MAX_THREAT_ROWS", "5000"))
+
+
+# class DatasetEnum(str, Enum):
+#     nsl_kdd = "nsl_kdd"
+#     cicids2017 = "cicids2017"
+#     unsw_nb15 = "unsw_nb15"
+
+
+# class ModelEnum(str, Enum):
+#     svm = "svm"
+#     knn = "knn"
+#     random_forest = "random_forest"
+#     naive_bayes = "naive_bayes"
+#     decision_tree = "decision_tree"
+#     fcnn = "fcnn"
+#     cnn = "cnn"
+#     lstm = "lstm"
+
+
+# def sanitize(name):
+#     return re.sub(r"[^0-9a-zA-Z]+", "_", str(name).strip()).strip("_").lower()
+
+
+# class EventEncoder:
+#     def __init__(self, n_bins=10):
+#         self.n_bins = n_bins
+#         self.num_cols, self.cat_cols, self.edges = [], [], {}
+
+#     def transform(self, df):
+#         cols = []
+#         for c in self.num_cols:
+#             e = self.edges[c]
+#             idx = np.searchsorted(e, df[c].to_numpy(dtype=np.float64), side="left")
+#             lut = np.array([f"{sanitize(c)}_b{i}" for i in range(len(e) + 1)], dtype=object)
+#             cols.append(lut[idx])
+#         for c in self.cat_cols:
+#             s = df[c].astype(str).str.strip().str.lower().str.replace(r"\s+", "_", regex=True)
+#             cols.append((sanitize(c) + "_" + s).to_numpy(dtype=object))
+#         mat = np.column_stack(cols)
+#         return [" ".join(row) for row in mat]
+
+#     def load_state(self, state_dict):
+#         self.n_bins = state_dict["n_bins"]
+#         self.num_cols = state_dict["num_cols"]
+#         self.cat_cols = state_dict["cat_cols"]
+#         self.edges = state_dict["edges"]
+#         return self
+
+
+# def clean_dataframe(df):
+#     """Replaces Inf/-Inf with NaN, then fills NaNs to prevent JSON serialization errors."""
+#     d = df.replace([np.inf, -np.inf], np.nan)
+#     for c in d.select_dtypes(include=[np.number]).columns:
+#         if d[c].isna().any():
+#             d[c] = d[c].fillna(d[c].median())
+#     for c in [c for c in d.columns if not pd.api.types.is_numeric_dtype(d[c])]:
+#         if d[c].isna().any():
+#             mode_val = d[c].mode()
+#             d[c] = d[c].fillna(mode_val.iloc[0] if not mode_val.empty else "unknown")
+#     return d
+
+
+# def to_sequence(X, steps=32):
+#     n, f = X.shape
+#     pad = (-f) % steps
+#     if pad:
+#         X = np.hstack([X, np.zeros((n, pad), dtype=X.dtype)])
+#     return X.reshape(n, steps, -1)
+
+
+# # ==========================================
+# # CACHED LOADERS (restart the server after retraining)
+# # ==========================================
+
+# @lru_cache(maxsize=8)
+# def load_artifacts(prefix):
+#     """Preprocessing artifacts for one dataset, loaded once and reused."""
+#     def _load(suffix):
+#         with open(os.path.join(BASE_DIR, f"{prefix}_{suffix}.pkl"), "rb") as f:
+#             return pickle.load(f)
+
+#     enc = EventEncoder().load_state(_load("event_encoder"))
+#     vec = _load("vectorizer")
+#     basepoint = _load("basepoint")
+#     scaler = _load("scaler")
+#     meta = _load("meta")
+
+#     try:
+#         feature_names = np.asarray(vec.get_feature_names_out())
+#     except Exception:
+#         feature_names = None  # explanations are skipped if the vectorizer can't list its features
+
+#     bp = basepoint.toarray() if hasattr(basepoint, "toarray") else basepoint
+#     bp_vec = np.asarray(bp, dtype=np.float64).reshape(-1)
+
+#     return {
+#         "enc": enc, "vec": vec, "basepoint": basepoint, "scaler": scaler,
+#         "meta": meta, "feature_names": feature_names, "bp_vec": bp_vec,
+#     }
+
+
+# @lru_cache(maxsize=12)
+# def load_dl_model(path):
+#     return tf.keras.models.load_model(path)
+
+
+# @lru_cache(maxsize=12)
+# def load_ml_model(path):
+#     return joblib.load(path)
+
+
+# def preprocess(df, art):
+#     """Event Encoding -> TF-IDF -> Cosine Sim -> Scaling -> Clipping."""
+#     ev_data = art["enc"].transform(df)
+#     X_vec = art["vec"].transform(ev_data)
+#     sim = cosine_similarity(X_vec, art["basepoint"]).astype(np.float32)
+#     X_dense = X_vec.toarray()
+#     X_p = np.hstack([X_dense, sim])
+#     X_s = art["scaler"].transform(X_p).astype(np.float32)
+#     np.clip(X_s, -art["meta"]["clip"], art["meta"]["clip"], out=X_s)
+#     return X_s, X_dense, sim.max(axis=1)
+
+
+# class InputError(ValueError):
+#     """The uploaded file can't be scanned; reported to the user as HTTP 422."""
+
+
+# def required_columns(art):
+#     return [str(c) for c in (*art["enc"].num_cols, *art["enc"].cat_cols)]
+
+
+# def check_required_columns(df, art, prefix):
+#     required = required_columns(art)
+#     present = {str(c) for c in df.columns}
+#     missing = [c for c in required if c not in present]
+#     if missing:
+#         shown = ", ".join(repr(c) for c in missing[:10])  # repr exposes stray spaces
+#         more = f" (and {len(missing) - 10} more)" if len(missing) > 10 else ""
+#         raise InputError(
+#             f"Your CSV is missing {len(missing)} of the {len(required)} columns the {prefix} "
+#             f"model needs: {shown}{more}. Check that you picked the right dataset."
+#         )
+
+
+# def read_and_prepare(file, prefix):
+#     try:
+#         df = pd.read_csv(file.file)
+#     except Exception as e:
+#         raise InputError(f"Could not read the file as a CSV: {e}")
+#     if df.empty:
+#         raise InputError("The uploaded CSV has no rows.")
+        
+#     # We clean the df of NaN/Infinity before copying it so df_original is safe to serialize
+#     df = clean_dataframe(df)
+#     df_original = df.copy()
+
+#     art = load_artifacts(prefix)
+#     check_required_columns(df, art, prefix)
+
+#     if "label" in df.columns:
+#         df = df.drop(columns=["label"])
+
+#     X_s, X_dense, sim = preprocess(df, art)
+#     return df_original, art, X_s, X_dense, sim
+
+
+# # ==========================================
+# # DEDICATED MODEL PREDICTION HANDLERS
+# # ==========================================
+
+# def predict_fcnn(model, X_s, dataset_name):
+#     """FCNN handler matching Kaggle's high-recall dynamic thresholding."""
+#     probs = model.predict(X_s, batch_size=1024, verbose=0).ravel()
+
+#     if dataset_name == "cicids2017":
+#         scores = np.power(probs, 0.65)
+#         predictions = (scores >= 0.01).astype(int)
+#     else:
+#         scores = probs
+#         predictions = (probs >= 0.5).astype(int)
+
+#     return predictions, scores
+
+
+# def predict_cnn_lstm(model, X_s, model_type, meta):
+#     """CNN and LSTM handler."""
+#     if model_type == "cnn":
+#         X_input = X_s[..., np.newaxis]
+#     elif model_type == "lstm":
+#         X_input = to_sequence(X_s, steps=meta.get("lstm_steps", 32))
+#     else:
+#         X_input = X_s
+
+#     probs = model.predict(X_input, batch_size=1024, verbose=0).ravel()
+#     return (probs >= 0.5).astype(int), probs
+
+
+# def predict_ml_model(model, X_s, want_scores=True):
+#     """Classical ML handler (SVM, RF, KNN, ...)."""
+#     predictions = np.asarray(model.predict(X_s)).astype(int)
+#     scores = None
+
+#     if want_scores and hasattr(model, "predict_proba"):
+#         try:
+#             proba = model.predict_proba(X_s)
+#             classes = list(getattr(model, "classes_", [0, 1]))
+#             col = classes.index(1) if 1 in classes else proba.shape[1] - 1
+#             scores = proba[:, col]
+#         except Exception:
+#             scores = None
+
+#     if want_scores and scores is None and hasattr(model, "decision_function"):
+#         try:
+#             d = np.asarray(model.decision_function(X_s)).ravel()
+#             scores = 1.0 / (1.0 + np.exp(-np.clip(d, -30, 30)))  # monotonic, not calibrated
+#         except Exception:
+#             scores = None
+
+#     if scores is None:
+#         scores = predictions.astype(float)
+#     return predictions, scores
+
+
+# def run_model(prefix, model_name, X_s, meta, want_scores=True):
+#     if model_name == "fcnn":
+#         model = load_dl_model(os.path.join(BASE_DIR, f"{prefix}_dl_fcnn.keras"))
+#         return predict_fcnn(model, X_s, prefix)
+#     if model_name in ("cnn", "lstm"):
+#         model = load_dl_model(os.path.join(BASE_DIR, f"{prefix}_dl_{model_name}.keras"))
+#         return predict_cnn_lstm(model, X_s, model_name, meta)
+#     model = load_ml_model(os.path.join(BASE_DIR, f"{prefix}_ml_{model_name}.pkl"))
+#     return predict_ml_model(model, X_s, want_scores)
+
+
+# # ==========================================
+# # ANALYST HELPERS (score, severity, evidence, metrics)
+# # ==========================================
+
+# def severity_of(score):
+#     for limit, name in SEVERITY_BANDS:
+#         if score >= limit:
+#             return name
+#     return "low"
+
+
+# def severity_counts(scores):
+#     """Counts per severity band for an array of attack scores."""
+#     counts = {name: 0 for _, name in SEVERITY_BANDS}
+#     remaining = np.ones(len(scores), dtype=bool)
+#     for limit, name in SEVERITY_BANDS:
+#         hit = remaining & (scores >= limit)
+#         counts[name] = int(hit.sum())
+#         remaining &= ~hit
+#     counts["low"] = int(remaining.sum())
+#     return counts
+
+
+# def build_threat_meta(threat_idx, scores, sim, X_dense, art, top_k=3, chunk=5000):
+#     """One entry per flagged row, in the same order as threat_details."""
+#     names, bp = art["feature_names"], art["bp_vec"]
+#     can_explain = names is not None and bp.shape[0] == X_dense.shape[1]
+
+#     out = []
+#     for s in range(0, len(threat_idx), chunk):
+#         part = threat_idx[s:s + chunk]
+#         events = [[] for _ in part]
+#         if can_explain:
+#             delta = X_dense[part] - bp
+#             top = np.argsort(-delta, axis=1)[:, :top_k]
+#             for r, cols in enumerate(top):
+#                 events[r] = [str(names[c]) for c in cols if delta[r, c] > 0]
+#         for r, i in enumerate(part):
+#             score = float(scores[i])
+#             out.append({
+#                 "row": int(i) + 1,  # 1-based data row in the uploaded CSV
+#                 "score": round(score, 4),
+#                 "severity": severity_of(score),
+#                 "similarity_to_normal": round(float(sim[i]), 4),
+#                 "unusual_events": events[r],
+#             })
+#     return out
+
+
+# NORMAL_LABELS = {"normal", "benign", "0", "0.0", "false", "none"}
+
+
+# def compute_metrics(df_original, predictions):
+#     """Accuracy/precision/recall/F1 when the CSV has a 'label' column."""
+#     try:
+#         col = next((c for c in df_original.columns if str(c).strip().lower() == "label"), None)
+#         if col is None:
+#             return None
+#         series = df_original[col]
+#         mask = series.notna().to_numpy()
+#         if mask.sum() == 0:
+#             return None
+
+#         labelled = series[mask]
+#         if pd.api.types.is_numeric_dtype(labelled):
+#             y_true = (labelled.astype(float) != 0).astype(int).to_numpy()
+#         else:
+#             y_true = (~labelled.astype(str).str.strip().str.lower().isin(NORMAL_LABELS)).astype(int).to_numpy()
+#         y_pred = np.asarray(predictions).astype(int)[mask]
+
+#         tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+#         return {
+#             "label_column": str(col),
+#             "labelled_records": int(mask.sum()),
+#             "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
+#             "precision": round(float(precision_score(y_true, y_pred, zero_division=0)), 4),
+#             "recall": round(float(recall_score(y_true, y_pred, zero_division=0)), 4),
+#             "f1": round(float(f1_score(y_true, y_pred, zero_division=0)), 4),
+#             "confusion_matrix": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
+#         }
+#     except Exception:
+#         return None  # metrics are optional and must never break a scan
+
+
+# # ==========================================
+# # API ROUTES
+# # ==========================================
+
+# @app.get("/health")
+# async def health():
+#     return {"status": "ok"}
+
+
+# @app.get("/schema/{dataset}")
+# async def schema(dataset: DatasetEnum):
+#     """Columns the chosen dataset's model needs, so the UI can check a CSV before upload."""
+#     try:
+#         art = load_artifacts(dataset.value)
+#         return {
+#             "dataset": dataset.value,
+#             "required_columns": required_columns(art),
+#             "optional_columns": ["label"],
+#         }
+#     except FileNotFoundError:
+#         raise HTTPException(status_code=404, detail=f"No saved artifacts found for {dataset.value}.")
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+# @app.post("/predict")
+# async def predict(
+#     dataset: DatasetEnum = Form(...),
+#     model_type: ModelEnum = Form(...),
+#     file: UploadFile = File(...)
+# ):
+#     try:
+#         started = time.time()
+#         prefix = dataset.value
+
+#         df_original, art, X_s, X_dense, sim = read_and_prepare(file, prefix)
+
+#         predictions, scores = run_model(prefix, model_type.value, X_s, art["meta"])
+#         predictions = np.asarray(predictions).astype(int)
+#         scores = np.nan_to_num(np.asarray(scores, dtype=np.float64))
+
+#         # Map predictions and build response (original fields unchanged)
+#         label_map = {0: "normal", 1: "attack"}
+#         results = [label_map[p] for p in predictions.tolist()]
+
+#         total_records = len(results)
+#         threat_count = results.count("attack")
+#         normal_count = total_records - threat_count
+
+#         df_original["predicted_status"] = results
+
+#         # Highest-scoring threats first if there are more than the browser should receive
+#         threat_idx = np.flatnonzero(predictions == 1)
+#         keep = threat_idx
+#         if MAX_THREAT_ROWS and len(threat_idx) > MAX_THREAT_ROWS:
+#             keep = np.sort(threat_idx[np.argsort(-scores[threat_idx])[:MAX_THREAT_ROWS]])
+
+#         df_threats = df_original.iloc[keep]
+
+#         # FastAPI/JSON cannot serialize NaN values, replace with None
+#         df_threats = df_threats.replace({np.nan: None})
+#         threat_details = df_threats.to_dict(orient="records")
+
+#         # Per-threat score, severity and evidence (same order as threat_details)
+#         threat_meta = build_threat_meta(keep, scores, sim, X_dense, art)
+
+#         return {
+#             "summary": {
+#                 "total_records": total_records,
+#                 "normal_traffic": normal_count,
+#                 "detected_threats": threat_count,
+#                 "severity_counts": severity_counts(scores[threat_idx]),
+#                 "threats_returned": len(threat_details),
+#                 "threats_truncated": len(threat_details) < threat_count,
+#                 "dataset": prefix,
+#                 "model_type": model_type.value,
+#                 "elapsed_seconds": round(time.time() - started, 2),
+#             },
+#             "threat_details": threat_details,
+#             "threat_meta": threat_meta,
+#             "metrics": compute_metrics(df_original, predictions),
+#         }
+
+#     except InputError as e:
+#         raise HTTPException(status_code=422, detail=str(e))
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+# @app.post("/compare")
+# async def compare(
+#     dataset: DatasetEnum = Form(...),
+#     file: UploadFile = File(...)
+# ):
+#     """Run one CSV through every model and report how they differ and agree."""
+#     try:
+#         prefix = dataset.value
+#         df_original, art, X_s, _, _ = read_and_prepare(file, prefix)
+#         total = len(df_original)
+
+#         rows, preds_by_model = [], {}
+#         for m in ModelEnum:
+#             started = time.time()
+#             try:
+#                 preds, _ = run_model(prefix, m.value, X_s, art["meta"], want_scores=False)
+#                 preds = np.asarray(preds).astype(int)
+#                 preds_by_model[m.value] = preds
+
+#                 threats = int(preds.sum())
+#                 row = {
+#                     "model": m.value,
+#                     "status": "ok",
+#                     "threats": threats,
+#                     "normal": total - threats,
+#                     "threat_rate": round(100.0 * threats / total, 2),
+#                     "seconds": round(time.time() - started, 2),
+#                 }
+#                 metrics = compute_metrics(df_original, preds)
+#                 if metrics:
+#                     row["metrics"] = metrics
+#             except Exception as e:  # one missing/broken model must not stop the rest
+#                 row = {"model": m.value, "status": "error", "detail": str(e)}
+#             rows.append(row)
+
+#         agreement = None
+#         ok = len(preds_by_model)
+#         if ok >= 2:
+#             votes = np.sum(list(preds_by_model.values()), axis=0)
+#             majority = (votes * 2 > ok).astype(int)
+#             agreement = {
+#                 "models_compared": ok,
+#                 "unanimous_threat": int((votes == ok).sum()),
+#                 "unanimous_normal": int((votes == 0).sum()),
+#                 "split": int(((votes > 0) & (votes < ok)).sum()),
+#             }
+#             for row in rows:
+#                 if row["status"] == "ok":
+#                     same = preds_by_model[row["model"]] == majority
+#                     row["agrees_with_majority"] = round(100.0 * float(same.mean()), 2)
+
+#         return {"dataset": prefix, "total_records": total, "models": rows, "agreement": agreement}
+
+#     except InputError as e:
+#         raise HTTPException(status_code=422, detail=str(e))
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
+
 import os
 import re
 import time
@@ -1411,8 +1939,8 @@ def ensure_models_downloaded():
         print("Models directory is empty. Downloading artifacts from Hugging Face...")
         try:
             snapshot_download(
-                repo_id="Rithvik-3103/cyber-ann-models",  # <--- REPLACE WITH YOUR ACTUAL HF USERNAME & REPO
-                repo_type="dataset",                         
+                repo_id="Rithvik-3103/cyber-ann-models",
+                repo_type="dataset",
                 local_dir=BASE_DIR
             )
             print("Successfully downloaded all models!")
@@ -1422,10 +1950,10 @@ def ensure_models_downloaded():
 # Run the check immediately when the app starts up
 ensure_models_downloaded()
 
-# 1. Initialize the FastAPI app exactly once
+# Initialize FastAPI app
 app = FastAPI(title="AI-SIEM Multi-Dataset Intrusion Detection API")
 
-# Allows requests from any frontend port (Vite/React)
+# CORS Middleware for React frontend communication
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1434,19 +1962,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Severity is derived from the model's attack score (0-1). Tune the bands here.
-SEVERITY_BANDS = ((0.90, "high"), (0.70, "medium"))  # anything lower is "low"
-
-# Max flagged rows sent to the browser per scan (highest scores first).
-# Summary counts always cover every record. Set MAX_THREAT_ROWS=0 for no limit.
+SEVERITY_BANDS = ((0.90, "high"), (0.70, "medium"))
 MAX_THREAT_ROWS = int(os.getenv("MAX_THREAT_ROWS", "5000"))
-
 
 class DatasetEnum(str, Enum):
     nsl_kdd = "nsl_kdd"
     cicids2017 = "cicids2017"
     unsw_nb15 = "unsw_nb15"
-
 
 class ModelEnum(str, Enum):
     svm = "svm"
@@ -1458,10 +1980,8 @@ class ModelEnum(str, Enum):
     cnn = "cnn"
     lstm = "lstm"
 
-
 def sanitize(name):
     return re.sub(r"[^0-9a-zA-Z]+", "_", str(name).strip()).strip("_").lower()
-
 
 class EventEncoder:
     def __init__(self, n_bins=10):
@@ -1488,9 +2008,7 @@ class EventEncoder:
         self.edges = state_dict["edges"]
         return self
 
-
 def clean_dataframe(df):
-    """Replaces Inf/-Inf with NaN, then fills NaNs to prevent JSON serialization errors."""
     d = df.replace([np.inf, -np.inf], np.nan)
     for c in d.select_dtypes(include=[np.number]).columns:
         if d[c].isna().any():
@@ -1501,7 +2019,6 @@ def clean_dataframe(df):
             d[c] = d[c].fillna(mode_val.iloc[0] if not mode_val.empty else "unknown")
     return d
 
-
 def to_sequence(X, steps=32):
     n, f = X.shape
     pad = (-f) % steps
@@ -1509,14 +2026,8 @@ def to_sequence(X, steps=32):
         X = np.hstack([X, np.zeros((n, pad), dtype=X.dtype)])
     return X.reshape(n, steps, -1)
 
-
-# ==========================================
-# CACHED LOADERS (restart the server after retraining)
-# ==========================================
-
 @lru_cache(maxsize=8)
 def load_artifacts(prefix):
-    """Preprocessing artifacts for one dataset, loaded once and reused."""
     def _load(suffix):
         with open(os.path.join(BASE_DIR, f"{prefix}_{suffix}.pkl"), "rb") as f:
             return pickle.load(f)
@@ -1530,7 +2041,7 @@ def load_artifacts(prefix):
     try:
         feature_names = np.asarray(vec.get_feature_names_out())
     except Exception:
-        feature_names = None  # explanations are skipped if the vectorizer can't list its features
+        feature_names = None
 
     bp = basepoint.toarray() if hasattr(basepoint, "toarray") else basepoint
     bp_vec = np.asarray(bp, dtype=np.float64).reshape(-1)
@@ -1540,19 +2051,15 @@ def load_artifacts(prefix):
         "meta": meta, "feature_names": feature_names, "bp_vec": bp_vec,
     }
 
-
 @lru_cache(maxsize=12)
 def load_dl_model(path):
     return tf.keras.models.load_model(path)
-
 
 @lru_cache(maxsize=12)
 def load_ml_model(path):
     return joblib.load(path)
 
-
 def preprocess(df, art):
-    """Event Encoding -> TF-IDF -> Cosine Sim -> Scaling -> Clipping."""
     ev_data = art["enc"].transform(df)
     X_vec = art["vec"].transform(ev_data)
     sim = cosine_similarity(X_vec, art["basepoint"]).astype(np.float32)
@@ -1562,27 +2069,23 @@ def preprocess(df, art):
     np.clip(X_s, -art["meta"]["clip"], art["meta"]["clip"], out=X_s)
     return X_s, X_dense, sim.max(axis=1)
 
-
 class InputError(ValueError):
-    """The uploaded file can't be scanned; reported to the user as HTTP 422."""
-
+    pass
 
 def required_columns(art):
     return [str(c) for c in (*art["enc"].num_cols, *art["enc"].cat_cols)]
-
 
 def check_required_columns(df, art, prefix):
     required = required_columns(art)
     present = {str(c) for c in df.columns}
     missing = [c for c in required if c not in present]
     if missing:
-        shown = ", ".join(repr(c) for c in missing[:10])  # repr exposes stray spaces
+        shown = ", ".join(repr(c) for c in missing[:10])
         more = f" (and {len(missing) - 10} more)" if len(missing) > 10 else ""
         raise InputError(
             f"Your CSV is missing {len(missing)} of the {len(required)} columns the {prefix} "
             f"model needs: {shown}{more}. Check that you picked the right dataset."
         )
-
 
 def read_and_prepare(file, prefix):
     try:
@@ -1592,7 +2095,6 @@ def read_and_prepare(file, prefix):
     if df.empty:
         raise InputError("The uploaded CSV has no rows.")
         
-    # We clean the df of NaN/Infinity before copying it so df_original is safe to serialize
     df = clean_dataframe(df)
     df_original = df.copy()
 
@@ -1605,27 +2107,17 @@ def read_and_prepare(file, prefix):
     X_s, X_dense, sim = preprocess(df, art)
     return df_original, art, X_s, X_dense, sim
 
-
-# ==========================================
-# DEDICATED MODEL PREDICTION HANDLERS
-# ==========================================
-
 def predict_fcnn(model, X_s, dataset_name):
-    """FCNN handler matching Kaggle's high-recall dynamic thresholding."""
     probs = model.predict(X_s, batch_size=1024, verbose=0).ravel()
-
     if dataset_name == "cicids2017":
         scores = np.power(probs, 0.65)
         predictions = (scores >= 0.01).astype(int)
     else:
         scores = probs
         predictions = (probs >= 0.5).astype(int)
-
     return predictions, scores
 
-
 def predict_cnn_lstm(model, X_s, model_type, meta):
-    """CNN and LSTM handler."""
     if model_type == "cnn":
         X_input = X_s[..., np.newaxis]
     elif model_type == "lstm":
@@ -1636,9 +2128,7 @@ def predict_cnn_lstm(model, X_s, model_type, meta):
     probs = model.predict(X_input, batch_size=1024, verbose=0).ravel()
     return (probs >= 0.5).astype(int), probs
 
-
 def predict_ml_model(model, X_s, want_scores=True):
-    """Classical ML handler (SVM, RF, KNN, ...)."""
     predictions = np.asarray(model.predict(X_s)).astype(int)
     scores = None
 
@@ -1654,14 +2144,13 @@ def predict_ml_model(model, X_s, want_scores=True):
     if want_scores and scores is None and hasattr(model, "decision_function"):
         try:
             d = np.asarray(model.decision_function(X_s)).ravel()
-            scores = 1.0 / (1.0 + np.exp(-np.clip(d, -30, 30)))  # monotonic, not calibrated
+            scores = 1.0 / (1.0 + np.exp(-np.clip(d, -30, 30)))
         except Exception:
             scores = None
 
     if scores is None:
         scores = predictions.astype(float)
     return predictions, scores
-
 
 def run_model(prefix, model_name, X_s, meta, want_scores=True):
     if model_name == "fcnn":
@@ -1673,20 +2162,13 @@ def run_model(prefix, model_name, X_s, meta, want_scores=True):
     model = load_ml_model(os.path.join(BASE_DIR, f"{prefix}_ml_{model_name}.pkl"))
     return predict_ml_model(model, X_s, want_scores)
 
-
-# ==========================================
-# ANALYST HELPERS (score, severity, evidence, metrics)
-# ==========================================
-
 def severity_of(score):
     for limit, name in SEVERITY_BANDS:
         if score >= limit:
             return name
     return "low"
 
-
 def severity_counts(scores):
-    """Counts per severity band for an array of attack scores."""
     counts = {name: 0 for _, name in SEVERITY_BANDS}
     remaining = np.ones(len(scores), dtype=bool)
     for limit, name in SEVERITY_BANDS:
@@ -1696,9 +2178,7 @@ def severity_counts(scores):
     counts["low"] = int(remaining.sum())
     return counts
 
-
 def build_threat_meta(threat_idx, scores, sim, X_dense, art, top_k=3, chunk=5000):
-    """One entry per flagged row, in the same order as threat_details."""
     names, bp = art["feature_names"], art["bp_vec"]
     can_explain = names is not None and bp.shape[0] == X_dense.shape[1]
 
@@ -1714,7 +2194,7 @@ def build_threat_meta(threat_idx, scores, sim, X_dense, art, top_k=3, chunk=5000
         for r, i in enumerate(part):
             score = float(scores[i])
             out.append({
-                "row": int(i) + 1,  # 1-based data row in the uploaded CSV
+                "row": int(i) + 1,
                 "score": round(score, 4),
                 "severity": severity_of(score),
                 "similarity_to_normal": round(float(sim[i]), 4),
@@ -1722,12 +2202,9 @@ def build_threat_meta(threat_idx, scores, sim, X_dense, art, top_k=3, chunk=5000
             })
     return out
 
-
 NORMAL_LABELS = {"normal", "benign", "0", "0.0", "false", "none"}
 
-
 def compute_metrics(df_original, predictions):
-    """Accuracy/precision/recall/F1 when the CSV has a 'label' column."""
     try:
         col = next((c for c in df_original.columns if str(c).strip().lower() == "label"), None)
         if col is None:
@@ -1755,21 +2232,14 @@ def compute_metrics(df_original, predictions):
             "confusion_matrix": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
         }
     except Exception:
-        return None  # metrics are optional and must never break a scan
-
-
-# ==========================================
-# API ROUTES
-# ==========================================
+        return None
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-
 @app.get("/schema/{dataset}")
 async def schema(dataset: DatasetEnum):
-    """Columns the chosen dataset's model needs, so the UI can check a CSV before upload."""
     try:
         art = load_artifacts(dataset.value)
         return {
@@ -1781,7 +2251,6 @@ async def schema(dataset: DatasetEnum):
         raise HTTPException(status_code=404, detail=f"No saved artifacts found for {dataset.value}.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/predict")
 async def predict(
@@ -1799,7 +2268,6 @@ async def predict(
         predictions = np.asarray(predictions).astype(int)
         scores = np.nan_to_num(np.asarray(scores, dtype=np.float64))
 
-        # Map predictions and build response (original fields unchanged)
         label_map = {0: "normal", 1: "attack"}
         results = [label_map[p] for p in predictions.tolist()]
 
@@ -1809,19 +2277,15 @@ async def predict(
 
         df_original["predicted_status"] = results
 
-        # Highest-scoring threats first if there are more than the browser should receive
         threat_idx = np.flatnonzero(predictions == 1)
         keep = threat_idx
         if MAX_THREAT_ROWS and len(threat_idx) > MAX_THREAT_ROWS:
             keep = np.sort(threat_idx[np.argsort(-scores[threat_idx])[:MAX_THREAT_ROWS]])
 
         df_threats = df_original.iloc[keep]
-
-        # FastAPI/JSON cannot serialize NaN values, replace with None
         df_threats = df_threats.replace({np.nan: None})
         threat_details = df_threats.to_dict(orient="records")
 
-        # Per-threat score, severity and evidence (same order as threat_details)
         threat_meta = build_threat_meta(keep, scores, sim, X_dense, art)
 
         return {
@@ -1846,13 +2310,11 @@ async def predict(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/compare")
 async def compare(
     dataset: DatasetEnum = Form(...),
     file: UploadFile = File(...)
 ):
-    """Run one CSV through every model and report how they differ and agree."""
     try:
         prefix = dataset.value
         df_original, art, X_s, _, _ = read_and_prepare(file, prefix)
@@ -1878,7 +2340,7 @@ async def compare(
                 metrics = compute_metrics(df_original, preds)
                 if metrics:
                     row["metrics"] = metrics
-            except Exception as e:  # one missing/broken model must not stop the rest
+            except Exception as e:
                 row = {"model": m.value, "status": "error", "detail": str(e)}
             rows.append(row)
 
