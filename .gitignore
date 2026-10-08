@@ -1,0 +1,20 @@
+# Node dependencies
+node_modules/
+frontend/node_modules/
+
+# Python compiled files
+__pycache__/
+*.pyc
+
+# Virtual environments (if you create one later)
+venv/
+env/
+
+# Saved ML models (GitHub blocks files over 100MB)
+backend/saved_models/
+*.keras
+*.h5
+*.pkl
+
+# Env files
+.env
