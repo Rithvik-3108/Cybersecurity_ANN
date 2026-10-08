@@ -1,8 +1,8 @@
 fastapi
-uvicorn[standard]
+uvicorn
 pandas
 numpy
 scikit-learn
 tensorflow
-python-multipart
 joblib
+huggingface_hub
